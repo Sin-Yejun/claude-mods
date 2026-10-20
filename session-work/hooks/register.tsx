@@ -13,18 +13,20 @@ const openPath = atom({ plugin: 'session-work', key: 'openPath' } as const, '')
 const notifyOn = atom({ plugin: 'session-work', key: 'notifyOn' } as const, true)
 const mood = atom({ plugin: 'session-work', key: 'mood' } as const, 'idle' as Mood)
 
-// The buddy: 18x10 pixels, two per cell via half blocks. O body, E eye, W zzz / '!'.
+// The buddy: 18x10 pixels on a 12-pixel-tall canvas (room to jump), two pixels a cell via
+// half blocks. O body, E eye, W zzz / '!'.
 const BUDDY_COLUMNS = 18
-const BUDDY_ROWS = 5
+const BUDDY_ROWS = 6
+export const BUDDY_Y = 2
 const PIXEL: Record<string, number> = { O: 0xd97757, E: 0x1f1f1f, W: 0xeeeeee }
 const NO_COLOR = 0x01000000
 // walking speed; the idle and failed faces change every IDLE_EVERY frames
 const FRAME_MS = 150
 const IDLE_EVERY = 4
 
-const body = (eyes: string, lids: string, legs: string) => [
-  '..............', '..OOOOOOOOOO..', eyes, lids,
-  'OOOOOOOOOOOOOO', 'OOOOOOOOOOOOOO', '..OOOOOOOOOO..', '..OOOOOOOOOO..', legs, legs,
+const body = (eyes: string, lids: string, legs: string, armsUp = false) => [
+  '..............', '..OOOOOOOOOO..', eyes, armsUp ? 'OO' + lids.slice(2, 12) + 'OO' : lids,
+  'OOOOOOOOOOOOOO', armsUp ? '..OOOOOOOOOO..' : 'OOOOOOOOOOOOOO', '..OOOOOOOOOO..', '..OOOOOOOOOO..', legs, legs,
 ]
 const side = (...rows: string[]) => Array.from({ length: 10 }, (_, i) => rows[i] ?? '....')
 const sprite = (left: string[], right: string[]) => left.map((row, i) => row + right[i])
@@ -33,12 +35,14 @@ const LEGS_A = '...O.O..O.O...'
 const LEGS_B = '..O.O....O.O..'
 const LOOK_LEFT = '..OEOOOOEOOO..'
 const LOOK_RIGHT = '..OOOEOOOOEO..'
+const OPEN = '..OOEOOOOEOO..'
 const NO_EYES = '..OOOOOOOOOO..'
 const SHUT = '..OEEOOOOEEO..'
 
 const walk = (eyes: string) => [LEGS_A, LEGS_B].map(legs => sprite(body(eyes, eyes, legs), side())) as [string[], string[]]
+const arms = () => [false, true].map(up => sprite(body(OPEN, OPEN, LEGS_A, up), side())) as [string[], string[]]
 
-export const SPRITES: Record<'left' | 'right' | 'idle' | 'failed', [string[], ...string[][]]> = {
+export const SPRITES: Record<'left' | 'right' | 'idle' | 'failed' | 'type' | 'cheer', [string[], ...string[][]]> = {
   left: walk(LOOK_LEFT),
   right: walk(LOOK_RIGHT),
   idle: [
@@ -46,7 +50,18 @@ export const SPRITES: Record<'left' | 'right' | 'idle' | 'failed', [string[], ..
     sprite(body(NO_EYES, SHUT, LEGS_A), side('WWW.', '.W..', 'WWW.')),
   ],
   failed: [sprite(body(SHUT, SHUT, LEGS_A), side('..W.', '..W.', '..W.', '....', '..W.'))],
+  // arms down, arms up: hammering at a file, or in the air on a jump
+  type: arms(),
+  cheer: arms(),
 }
+
+// A subagent's little companion, 6x6, hopping on alternate legs.
+export const HELPER: [string[], string[]] = [
+  ['......', '.OOOO.', '.EOOE.', 'OOOOOO', '.OOOO.', '.O..O.'],
+  ['......', '.OOOO.', '.EOOE.', 'OOOOOO', '.OOOO.', 'O....O'],
+]
+const MAX_HELPERS = 3
+const HELPER_GAP = 7
 
 // Each cell is the upper pixel as '▀' foreground over the lower as background.
 export const toCells = (pixels: string[]) => {
@@ -69,9 +84,22 @@ export const toCells = (pixels: string[]) => {
   return bytes.toBase64()
 }
 
-// The sprite laid on a canvas as wide as the pane; columns off either edge are cut.
-export const canvas = (pixels: string[], x: number, width: number) =>
-  pixels.map(row => Array.from({ length: width }, (_, c) => row[c - x] ?? '.').join(''))
+export type Layer = { pixels: string[]; x: number; y: number }
+
+// The layers painted in order on a width x height canvas; '.' is see-through, anything off the edges is cut.
+export const compose = (layers: Layer[], width: number, height: number) => {
+  const rows = Array.from({ length: height }, () => Array<string>(width).fill('.'))
+  for (const { pixels, x, y } of layers)
+    pixels.forEach((row, r) => {
+      const line = rows[y + r]
+      for (let c = 0; line && c < row.length; c++) {
+        const pixel = row[c]
+        if (pixel && pixel !== '.' && x + c >= 0 && x + c < width) line[x + c] = pixel
+      }
+    })
+
+  return rows.map(row => row.join(''))
+}
 
 // One busy step: mostly straight, now and then a turn; fully off an edge, it turns back or comes round the other side.
 export const wander = (x: number, dir: number, width: number, random = Math.random) => {
@@ -107,23 +135,56 @@ export const rest = (at: Rest, width: number, mayStroll: boolean, random = Math.
   return { ...at, stroll, isWalking: false }
 }
 
+export type Action = { kind: 'type' | 'jump'; tick: number }
+const ACTION_TICKS: Record<Action['kind'], number> = { type: 10, jump: 12 }
+const JUMP_ARC = [0, -1, -2, -2, -1, 0]
+
+export type Scene = { mood: Mood; buddy: Rest; action?: Action; helpers: number; tick: number }
+
+const pick = <T,>(frames: [T, ...T[]], i: number) => frames[i % frames.length] ?? frames[0]
+
+// What to paint this frame: an action (hammering, a jump) holds the buddy still; else it walks or rests.
+// The helpers trail behind it, one per running subagent.
+export const scene = ({ mood: m, buddy: b, action: a, helpers, tick }: Scene): Layer[] => {
+  let pixels = pick(SPRITES[m === 'failed' ? 'failed' : 'idle'], Math.floor(tick / IDLE_EVERY))
+  let y = BUDDY_Y
+  if (a?.kind === 'type') pixels = pick(SPRITES.type, a.tick)
+  else if (a?.kind === 'jump') {
+    const lift = JUMP_ARC[a.tick % JUMP_ARC.length] ?? 0
+    y += lift
+    pixels = pick(SPRITES.cheer, lift < 0 ? 1 : 0)
+  } else if (m === 'working' || b.isWalking) pixels = pick(SPRITES[b.dir > 0 ? 'right' : 'left'], tick)
+
+  const trail = Array.from({ length: Math.min(helpers, MAX_HELPERS) }, (_, i) => ({
+    pixels: pick(HELPER, tick + i),
+    x: b.dir > 0 ? b.x - HELPER_GAP * (i + 1) : b.x + 15 + HELPER_GAP * i,
+    y: BUDDY_ROWS * 2 - 6,
+  }))
+
+  return [...trail, { pixels, x: b.x, y }]
+}
+
 let frameTimer: { cancel: () => void } | undefined
 let frameTick = 0
 let paneColumns = 40
 let lastBlit = ''
-// shortcut: position lives in the module, so a reload re-centres the buddy; fine for a toy.
+// shortcut: these live in the module, so a reload re-centres the buddy and drops its helpers until the next agent change.
 let buddy: Rest | undefined
+let action: Action | undefined
+let helpers = 0
 
-const buddyCells = (m: Mood) => {
-  buddy ??= { x: Math.max(0, Math.floor((paneColumns - BUDDY_COLUMNS) / 2)), dir: 1, stroll: 0, isWalking: false }
-  let frames = SPRITES[buddy.dir > 0 ? 'right' : 'left']
-  let index = frameTick
-  if (m !== 'working' && !buddy.isWalking) {
-    frames = SPRITES[m === 'failed' ? 'failed' : 'idle']
-    index = Math.floor(frameTick / IDLE_EVERY)
-  }
+const centred = (): Rest => ({ x: Math.max(0, Math.floor((paneColumns - BUDDY_COLUMNS) / 2)), dir: 1, stroll: 0, isWalking: false })
 
-  return toCells(canvas(frames[index % frames.length] ?? frames[0], buddy.x, paneColumns))
+const buddyCells = (m: Mood) =>
+  toCells(compose(scene({ mood: m, buddy: (buddy ??= centred()), action, helpers, tick: frameTick }), paneColumns, BUDDY_ROWS * 2))
+
+// One frame on: an action plays out first; else work wanders, rest moves at half pace.
+const step = (m: Mood) => {
+  const b = (buddy ??= centred())
+  frameTick++
+  if (action) action = action.tick + 1 < ACTION_TICKS[action.kind] ? { ...action, tick: action.tick + 1 } : undefined
+  else if (m === 'working') buddy = { ...wander(b.x, b.dir, paneColumns), stroll: 0, isWalking: true }
+  else if (frameTick % 2 === 0) buddy = rest(b, paneColumns, m === 'idle')
 }
 
 // a turn shorter than this gets no notification
@@ -158,6 +219,7 @@ const relative = (path: string, base: string) => {
 
 const refreshAgents = async ($: EngineInterface) => {
   const list = await $.agent.list()
+  helpers = list.filter(a => ['running', 'pending', 'waiting'].includes(a.status)).length
   await update($, agents, () =>
     list.map(a => ({ id: a.id, label: a.description || a.type, status: a.status })),
   )
@@ -189,6 +251,7 @@ const trackFile = async <R extends { deny?: string; isError?: true }>(
 
     return [change, ...list.filter(f => f.path !== path)]
   })
+  if (action?.kind !== 'jump') action = { kind: 'type', tick: 0 }
 
   return ran
 }
@@ -231,10 +294,7 @@ export const register: Register = on => {
     frameTimer?.cancel()
     frameTimer = $.clock.every(FRAME_MS, async () => {
       const m = await read($, mood)
-      frameTick++
-      if (buddy && m === 'working') buddy = { ...wander(buddy.x, buddy.dir, paneColumns), stroll: 0, isWalking: true }
-      // resting moves at half the working pace
-      else if (buddy && frameTick % 2 === 0) buddy = rest(buddy, paneColumns, m === 'idle')
+      step(m)
       const cells = buddyCells(m)
       if (cells === lastBlit) return
       lastBlit = cells
@@ -315,7 +375,10 @@ export const register: Register = on => {
     const done = await next(e)
     await refreshAgents($)
     // a failure stays on its face until the next turn starts
-    if (!e.agentId) await update($, mood, m => (m === 'failed' ? m : 'idle'))
+    if (!e.agentId) {
+      const now = await update($, mood, m => (m === 'failed' ? m : 'idle'))
+      if (now === 'idle' && !e.isAborted) action = { kind: 'jump', tick: 0 }
+    }
 
     // the main loop only: a subagent's turn ends inside the main one
     if (!e.agentId && !e.isAborted && e.durationMs >= NOTIFY_AFTER_MS && (await read($, notifyOn))) {

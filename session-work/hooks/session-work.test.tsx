@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { canvas, lineDiff, rest, SPRITES, toCells, wander } from './register'
+import { BUDDY_Y, compose, HELPER, lineDiff, rest, scene, SPRITES, toCells, wander } from './register'
 
 const PANE = {
   plugin: 'session-work',
@@ -96,9 +96,9 @@ test('every buddy frame is 18x10 pixels and the pane draws the mood of the turn'
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const cells = async () => (await ui.find({ type: 'Raster', key: 'buddy' }))?.props.cells
   // idle sits centred: (60 - 18) / 2
-  expect(await cells()).toBe(toCells(canvas(SPRITES.idle[0], 21, 60)))
+  expect(await cells()).toBe(toCells(compose([{ pixels: SPRITES.idle[0], x: 21, y: BUDDY_Y }], 60, 12)))
   await $.turn.start({ text: 'hi', turnId: 't' })
-  expect(await cells()).toBe(toCells(canvas(SPRITES.right[0], 21, 60)))
+  expect(await cells()).toBe(toCells(compose([{ pixels: SPRITES.right[0], x: 21, y: BUDDY_Y }], 60, 12)))
   await ui.unmount()
 })
 
@@ -114,7 +114,7 @@ test('the walking buddy leaves either edge and always comes back', async () => {
     else if (wentOff) cameBack = true
   }
   expect(cameBack).toBe(true)
-  expect(canvas(['abc'], -1, 4)).toEqual(['bc..'])
+  expect(compose([{ pixels: ['abc'], x: -1, y: 0 }, { pixels: ['.Z'], x: 1, y: 0 }], 4, 1)).toEqual(['bcZ.'])
 })
 
 test('resting, the buddy walks back in a cell at a time and strolls only on screen', async () => {
@@ -131,4 +131,28 @@ test('resting, the buddy walks back in a cell at a time and strolls only on scre
   // a failed face comes back in but never strolls
   const failed = rest({ x: 10, dir: 1, stroll: 5, isWalking: false }, 60, false, () => 0)
   expect(failed).toEqual({ x: 10, dir: 1, stroll: 0, isWalking: false })
+})
+
+test('the buddy hammers at a file, jumps when a turn is done, and leads its helpers', async () => {
+  const resting = { x: 20, dir: 1, stroll: 0, isWalking: false }
+  const base = { mood: 'idle', buddy: resting, helpers: 0, tick: 0 } as const
+  const me = (layers: ReturnType<typeof scene>) => layers[layers.length - 1]
+
+  // hammering: arms down, up, down, standing still on the ground
+  const hits = [0, 1, 2].map(tick => me(scene({ ...base, mood: 'working', action: { kind: 'type', tick } })))
+  expect(hits.map(l => l?.pixels)).toEqual([SPRITES.type[0], SPRITES.type[1], SPRITES.type[0]])
+  expect(hits.every(l => l?.x === 20 && l.y === BUDDY_Y)).toBe(true)
+
+  // two jumps: up two pixels with arms raised, and back on the ground at the end
+  const heights = Array.from({ length: 12 }, (_, tick) => me(scene({ ...base, action: { kind: 'jump', tick } }))?.y)
+  expect(Math.min(...(heights as number[]))).toBe(BUDDY_Y - 2)
+  expect(heights[11]).toBe(BUDDY_Y)
+  expect(me(scene({ ...base, action: { kind: 'jump', tick: 2 } }))?.pixels).toEqual(SPRITES.cheer[1])
+
+  // helpers trail behind, at most three, drawn beneath the buddy
+  const crowd = scene({ ...base, helpers: 5 })
+  expect(crowd.length).toBe(4)
+  expect(crowd.slice(0, 3).map(l => l.x)).toEqual([13, 6, -1])
+  expect(scene({ ...base, buddy: { ...resting, dir: -1 }, helpers: 1 })[0]?.x).toBe(35)
+  for (const frame of HELPER) expect(frame.every(row => row.length === 6) && frame.length === 6).toBe(true)
 })
