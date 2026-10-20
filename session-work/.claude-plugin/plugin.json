@@ -1,0 +1,1 @@
+{ "name": "session-work", "version": "0.1.0", "description": "이번 세션에서 바뀐 파일과 진행 중인 작업을 사이드 패널에 보여줍니다", "types": "./types/index.d.ts" }

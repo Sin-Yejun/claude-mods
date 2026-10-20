@@ -1,0 +1,5 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "Sin-Yejun" },
+  "plugins": [{ "name": "session-work", "source": "./session-work" }]
+}
