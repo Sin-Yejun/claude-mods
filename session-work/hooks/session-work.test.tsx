@@ -33,16 +33,21 @@ test('the pane lists a written file and a background command', async ($, on) => 
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.call', (_, e) => {
     if (e.tool === 'Write') disk.set(e.file_path.replaceAll('\\', '/'), e.content)
-    return { result: e.tool === 'Bash' ? { backgroundTaskId: 'b1' } : {} }
+    if (e.tool === 'Bash') return { result: { backgroundTaskId: 'b1' } }
+    if (e.tool === 'PowerShell') return { result: { backgroundTaskId: 'p1' } }
+    return { result: {} }
   })
 
   await $.session.start({ cwd: 'C:/p', surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: 'Write', file_path: 'C:/p/a.txt', content: 'one\nTWO\nthree' })
   await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'dev 서버', run_in_background: true })
+  await $.tool.call({ tool: 'PowerShell', command: 'npm run watch', description: '감시 빌드', run_in_background: true })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /바뀐 파일 1개/ }))?.text).toContain('+2 -1')
   expect((await ui.find({ type: 'Text', text: /dev 서버/ }))?.text).toContain('명령')
+  expect((await ui.find({ type: 'Text', text: /감시 빌드/ }))?.text).toContain('명령')
+  expect(await ui.find({ type: 'Text', text: /백그라운드 2개 진행 중/ })).toBeTruthy()
   await ui.unmount()
 })
 

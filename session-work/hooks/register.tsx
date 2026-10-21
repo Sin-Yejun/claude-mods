@@ -321,7 +321,7 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Write' }, ($, e, next) => trackFile($, e.file_path, () => next(e)))
     .catch(($, e, next) => next(e))
 
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+  on('tool.call', { tool: ['Bash', 'PowerShell'] }, async ($, e, next) => {
     const ran = await next(e)
     const id = ran.deny === undefined && !ran.isError ? ran.result.backgroundTaskId : undefined
     if (id) {
@@ -493,7 +493,7 @@ export const register: Register = on => {
           </Box>
         ))}
         <Text> </Text>
-        <Text bold>작업 {rows.filter(r => ['running', 'pending', 'waiting', 'scheduled'].includes(r.status)).length}개 진행 중</Text>
+        <Text bold>백그라운드 {rows.filter(r => ['running', 'pending', 'waiting', 'scheduled'].includes(r.status)).length}개 진행 중</Text>
         {rows.length === 0 && <Text dimColor>  아직 없음</Text>}
         {rows.map(r => (
           <Text dimColor={['completed', 'killed'].includes(r.status)}>
